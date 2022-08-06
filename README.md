@@ -1,7 +1,7 @@
 - 👋 Hi, I’m @PavelHristov
-- 👀 I’m interested in JavaScript
-- 🌱 I’m currently learning JavaScript
-- 📫 How to reach me hristov.pavel@zohomail.eu
+- 👀 I’m interested in front-end development
+- 🌱 I’m currently learning React
+- 📫 You can reach me on hristov.pavel@zohomail.eu
 
 <!---
 ribarlyk/ribarlyk is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
