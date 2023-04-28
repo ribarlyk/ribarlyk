@@ -1,6 +1,8 @@
 - 👋 Hi, I’m @PavelHristov
 - 👀 I’m interested in front-end development
-- 🌱 I’m currently learning React
+- 🌱 I am motivated and enthusiastic, a
+        recent graduate, eager to begin my
+        career as a JavaScript developer 
 - 📫 You can reach me on hristov.pavel@zohomail.eu
 
 
