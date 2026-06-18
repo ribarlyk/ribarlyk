@@ -742,6 +742,13 @@ export default function CheckoutPage() {
   const [prContainer, setPrContainer] = useState<HTMLDivElement | null>(null);
   const [revolutPayContainer, setRevolutPayContainer] = useState<HTMLDivElement | null>(null);
   const cardSubmittingRef = useRef(false);
+  // Token of the active Revolut order — kept in a ref so the polling fallback can
+  // place the order even when the SDK's onSuccess never fires (e.g. after 3DS).
+  const cardTokenRef = useRef<string | null>(null);
+  // Guards against placing the order twice (onSuccess and the poll can race).
+  const orderPlacedRef = useRef(false);
+  // True while waiting for the card result (including a 3DS challenge) — drives the poll.
+  const [awaitingCard, setAwaitingCard] = useState(false);
 
   // Form restoring from sessionStorage (avoids flash of empty inputs on mount/Revolut redirect)
   const [formRestoring, setFormRestoring] = useState(true);
@@ -778,6 +785,8 @@ export default function CheckoutPage() {
         const token: string = data.publicId;
         const ordId: string = data.orderId;
         setRevolutOrderId(ordId);
+        cardTokenRef.current = token;
+        orderPlacedRef.current = false;
 
         const RC = await RevolutCheckout(
           token,
@@ -805,16 +814,19 @@ export default function CheckoutPage() {
           },
           onSuccess() {
             cardSubmittingRef.current = false;
+            setAwaitingCard(false);
             setRevolutPublicId(token);
           },
           onError(error: { message?: string }) {
             cardSubmittingRef.current = false;
+            setAwaitingCard(false);
             setPlaceError(error?.message ?? "Грешка при плащането с карта");
             setPlacing(false);
           },
           onValidation(errors: { message: string }[]) {
             if (cardSubmittingRef.current && errors.length > 0) {
               cardSubmittingRef.current = false;
+              setAwaitingCard(false);
               setPlacing(false);
               setPlaceError("Моля, попълнете данните на картата.");
             }
@@ -838,6 +850,8 @@ export default function CheckoutPage() {
       setCardFieldReady(false);
       setRevolutPublicId(null);
       setRevolutOrderId(null);
+      setAwaitingCard(false);
+      cardTokenRef.current = null;
     };
     // Recreate the order if the shipping cost changes so the charge stays in sync.
   }, [selectedPayment, cardFieldContainer, currentShippingAmount]);
@@ -950,9 +964,61 @@ export default function CheckoutPage() {
   // ── Auto-place order the moment card payment succeeds ────────────────────────
   useEffect(() => {
     if (!revolutPublicId) return;
+    if (orderPlacedRef.current) return;
+    orderPlacedRef.current = true;
     handlePlaceOrder();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revolutPublicId]);
+
+  // ── Fallback: poll Revolut for the card result ───────────────────────────────
+  // After a 3DS challenge the SDK's onSuccess sometimes never fires (the challenge
+  // window doesn't hand control back), leaving the button stuck on "Обработва се…".
+  // We poll the order state so the app still learns the payment authorised and
+  // places the order. The SDK callbacks remain the primary, faster path.
+  useEffect(() => {
+    if (!awaitingCard || !revolutOrderId) return;
+    let stopped = false;
+    const startedAt = Date.now();
+    const interval = setInterval(async () => {
+      if (stopped) return;
+      // Give up after ~3 min — by then a real payment would have resolved.
+      if (Date.now() - startedAt > 180000) {
+        clearInterval(interval);
+        return;
+      }
+      try {
+        const r = await fetch(
+          `/api/checkout/revolut-order-status?orderId=${revolutOrderId}`,
+          { credentials: "include", cache: "no-store" },
+        );
+        if (!r.ok) return;
+        const { state } = await r.json();
+        if (state === "authorised" || state === "completed") {
+          clearInterval(interval);
+          if (!orderPlacedRef.current) {
+            cardSubmittingRef.current = false;
+            setAwaitingCard(false);
+            setRevolutPublicId(cardTokenRef.current);
+          }
+        } else if (
+          state === "failed" ||
+          state === "cancelled" ||
+          state === "declined"
+        ) {
+          clearInterval(interval);
+          cardSubmittingRef.current = false;
+          setAwaitingCard(false);
+          setPlacing(false);
+          setPlaceError("Плащането не бе успешно. Опитайте отново.");
+        }
+      } catch {}
+    }, 2500);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingCard, revolutOrderId]);
 
   // ── Load everything on mount — no form dependency ────────────────────────────
   const DEFAULT_BG_ADDRESS: ShippingAddress = {
@@ -1150,9 +1216,31 @@ export default function CheckoutPage() {
       );
       await refreshCart();
     } catch (e) {
+      // Allow another placement attempt if this one failed (card already authorised).
+      orderPlacedRef.current = false;
       setPlaceError(e instanceof Error ? e.message : "Грешка");
     } finally {
       setPlacing(false);
+    }
+  }
+
+  // Submits the Revolut card field (may trigger a 3DS challenge). Sets awaitingCard
+  // so the poll fallback engages if the SDK's onSuccess never comes back.
+  function submitCard() {
+    if (!cardField) return;
+    cardSubmittingRef.current = true;
+    setPlaceError(null);
+    setPlacing(true);
+    setAwaitingCard(true);
+    try {
+      cardField.submit({
+        email: getShipping().email?.trim(),
+        name: cardholderName.trim(),
+      });
+    } catch {
+      cardSubmittingRef.current = false;
+      setPlacing(false);
+      setAwaitingCard(false);
     }
   }
 
@@ -1824,23 +1912,7 @@ export default function CheckoutPage() {
                   />
                 </div>
                 <button
-                  onClick={
-                    isRevolutPay
-                      ? () => {
-                          cardSubmittingRef.current = true;
-                          setPlacing(true);
-                          try {
-                            cardField?.submit({
-                              email: getShipping().email?.trim(),
-                              name: cardholderName.trim(),
-                            });
-                          } catch {
-                            cardSubmittingRef.current = false;
-                            setPlacing(false);
-                          }
-                        }
-                      : handlePlaceOrder
-                  }
+                  onClick={isRevolutPay ? submitCard : handlePlaceOrder}
                   disabled={!canPlaceOrder}
                   className="w-full flex items-center justify-center gap-2.5 bg-brand-action hover:bg-brand-action-light disabled:bg-gray-200 disabled:text-gray-400 text-white font-semibold py-4 rounded-xl transition-colors text-base shadow-sm cursor-pointer disabled:cursor-not-allowed"
                 >
@@ -1887,23 +1959,7 @@ export default function CheckoutPage() {
                   />
                 </div>
                 <button
-                  onClick={
-                    isRevolutPay
-                      ? () => {
-                          cardSubmittingRef.current = true;
-                          setPlacing(true);
-                          try {
-                            cardField?.submit({
-                              email: getShipping().email?.trim(),
-                              name: cardholderName.trim(),
-                            });
-                          } catch {
-                            cardSubmittingRef.current = false;
-                            setPlacing(false);
-                          }
-                        }
-                      : handlePlaceOrder
-                  }
+                  onClick={isRevolutPay ? submitCard : handlePlaceOrder}
                   disabled={!canPlaceOrder}
                   className="w-full flex items-center justify-center gap-2.5 bg-brand-action hover:bg-brand-action-light disabled:bg-gray-200 disabled:text-gray-400 text-white font-semibold py-4 rounded-xl transition-colors text-base shadow-sm cursor-pointer disabled:cursor-not-allowed"
                 >

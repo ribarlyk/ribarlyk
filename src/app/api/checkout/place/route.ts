@@ -262,6 +262,32 @@ export async function POST(request: NextRequest) {
 
     cookieStore.delete("cart-id");
 
+    // Link the Revolut order to this Magento order number via merchant_order_data.reference.
+    // The webhook receives this back as `merchant_order_ext_ref`, letting it find and
+    // invoice the order if the synchronous invoicing below is skipped or fails.
+    if (isRevolut && hasPublicId && REVOLUT_API_SECRET_KEY) {
+      const revolutOrderId = paymentMethod.additional_data?.order_id;
+      const uuidRe =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (revolutOrderId && uuidRe.test(revolutOrderId)) {
+        try {
+          await fetch(`${REVOLUT_API_BASE}/orders/${revolutOrderId}`, {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${REVOLUT_API_SECRET_KEY}`,
+              "Revolut-Api-Version": "2024-09-01",
+            },
+            body: JSON.stringify({
+              merchant_order_data: { reference: orderNumber },
+            }),
+          });
+        } catch (e) {
+          console.error("Failed to set Revolut merchant reference:", e);
+        }
+      }
+    }
+
     // Post-order admin tasks (email + optional Revolut invoicing) — never block the response
     if (MAGENTO_ADMIN_USER && MAGENTO_ADMIN_PASSWORD) {
       try {
